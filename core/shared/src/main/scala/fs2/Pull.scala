@@ -595,48 +595,51 @@ object Pull extends PullLowPriority {
             case uU: Step[f, y] =>
               val u: Step[F, y] = uU.asInstanceOf[Step[F, y]]
               // if scope was specified in step, try to find it, otherwise use the current scope.
-              F.flatMap(u.scope.fold[F[Option[CompileScope[F]]]](F.pure(Some(scope))) { scopeId =>
-                scope.findStepScope(scopeId)
-              }) {
-                case Some(stepScope) =>
-                  val stepStream = u.stream.asInstanceOf[Pull[F, y, Unit]]
-                  F.flatMap(F.attempt(go[y](stepScope, extendedTopLevelScope, stepStream))) {
-                    case Right(Done(scope)) =>
-                      interruptGuard(scope)(
-                        go(scope, extendedTopLevelScope, view.next(Result.Succeeded(None)))
+              val stepScopeF: F[CompileScope[F]] = u.scope match {
+                case None => F.pure(scope)
+                case Some(scopeId) => scope.findStepScope(scopeId).flatMap {
+                  case Some(scope) => F.pure(scope)
+                  case None =>
+                    F.raiseError(
+                      new RuntimeException(
+                        s"""|Scope lookup failure!
+                            |
+                            |This is typically caused by uncons-ing from two or more streams in the same Pull.
+                            |To do this safely, use `s.pull.stepLeg` instead of `s.pull.uncons` or a variant
+                            |thereof. See the implementation of `Stream#zipWith_` for an example.
+                            |
+                            |Scope id: ${scope.id}
+                            |Step: ${u}""".stripMargin
                       )
-                    case Right(Out(head, outScope, tail)) =>
-                      // if we originally swapped scopes we want to return the original
-                      // scope back to the go as that is the scope that is expected to be here.
-                      val nextScope = if (u.scope.isEmpty) outScope else scope
-                      val result = Result.Succeeded(
-                        Some((head, outScope.id, tail.asInstanceOf[Pull[f, y, Unit]]))
-                      ) //Option[(Chunk[y], Token, Pull[f, y, Unit])])
-                      val next = view.next(result).asInstanceOf[Pull[F, X, Unit]]
-                      interruptGuard(nextScope)(
-                        go(nextScope, extendedTopLevelScope, next)
-                      )
-
-                    case Right(Interrupted(scopeId, err)) =>
-                      go(scope, extendedTopLevelScope, view.next(Result.Interrupted(scopeId, err)))
-
-                    case Left(err) =>
-                      go(scope, extendedTopLevelScope, view.next(Result.Fail(err)))
-                  }
-
-                case None =>
-                  F.raiseError(
-                    new RuntimeException(
-                      s"""|Scope lookup failure!
-                          |
-                          |This is typically caused by uncons-ing from two or more streams in the same Pull.
-                          |To do this safely, use `s.pull.stepLeg` instead of `s.pull.uncons` or a variant
-                          |thereof. See the implementation of `Stream#zipWith_` for an example.
-                          |
-                          |Scope id: ${scope.id}
-                          |Step: ${u}""".stripMargin
                     )
-                  )
+                }
+              }
+
+              val stepStream = u.stream.asInstanceOf[Pull[F, y, Unit]]
+              F.flatMap(stepScopeF){ stepScope =>
+                F.flatMap(F.attempt(go[y](stepScope, extendedTopLevelScope, stepStream))) {
+                  case Right(Done(scope)) =>
+                    interruptGuard(scope)(
+                      go(scope, extendedTopLevelScope, view.next(Result.Succeeded(None)))
+                    )
+                  case Right(Out(head, outScope, tail)) =>
+                    // if we originally swapped scopes we want to return the original
+                    // scope back to the go as that is the scope that is expected to be here.
+                    val nextScope = if (u.scope.isEmpty) outScope else scope
+                    val result = Result.Succeeded(
+                      Some((head, outScope.id, tail.asInstanceOf[Pull[f, y, Unit]]))
+                    ) //Option[(Chunk[y], Token, Pull[f, y, Unit])])
+                    val next = view.next(result).asInstanceOf[Pull[F, X, Unit]]
+                    interruptGuard(nextScope)(
+                      go(nextScope, extendedTopLevelScope, next)
+                    )
+
+                  case Right(Interrupted(scopeId, err)) =>
+                    go(scope, extendedTopLevelScope, view.next(Result.Interrupted(scopeId, err)))
+
+                  case Left(err) =>
+                    go(scope, extendedTopLevelScope, view.next(Result.Fail(err)))
+                }
               }
 
             case eval: Eval[F, r] =>
